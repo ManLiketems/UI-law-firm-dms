@@ -1,0 +1,1634 @@
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+if (current_user()) redirect('dashboard.php');
+
+$error = '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $login = trim($_POST['login'] ?? '');
+    $pass  = (string)($_POST['password'] ?? '');
+    if ($login === '' || $pass === '') {
+        $error = 'Enter your username or email and your password.';
+    } else {
+        $st = db()->prepare('SELECT u.*, r.role_name FROM users u JOIN roles r ON r.role_id = u.role_id
+                             WHERE u.username = ? OR u.email = ? LIMIT 1');
+        $st->execute([$login, $login]);
+        $u = $st->fetch();
+        if (!$u) {
+            audit('failed login: unknown user');
+            $error = 'Invalid username/email or password.';
+        } elseif ($u['status'] === 'Locked') {
+            audit('login blocked: account locked', null, (int)$u['user_id']);
+            $error = 'This account is locked after repeated failed logins. Contact the Administrator.';
+        } elseif ($u['status'] === 'Disabled') {
+            audit('login blocked: account disabled', null, (int)$u['user_id']);
+            $error = 'This account has been disabled. Contact the Administrator.';
+        } elseif (password_verify($pass, $u['password_hash'])) {
+            session_regenerate_id(true);
+            $_SESSION['user'] = [
+                'user_id'   => (int)$u['user_id'],
+                'username'  => $u['username'],
+                'full_name' => $u['full_name'],
+                'role_name' => $u['role_name'],
+                'client_id' => $u['client_id'] !== null ? (int)$u['client_id'] : null,
+            ];
+            $_SESSION['last_activity'] = time();
+            db()->prepare('UPDATE users SET failed_attempts = 0, last_login = NOW() WHERE user_id = ?')->execute([(int)$u['user_id']]);
+            audit('login', null, (int)$u['user_id']);
+            redirect('dashboard.php');
+        } else {
+            $n = (int)$u['failed_attempts'] + 1;
+            if ($n >= MAX_FAILED) {
+                db()->prepare("UPDATE users SET failed_attempts = ?, status = 'Locked' WHERE user_id = ?")->execute([$n, (int)$u['user_id']]);
+                audit('failed login', null, (int)$u['user_id']);
+                audit('account locked after failed logins', null, (int)$u['user_id']);
+                $error = 'Too many failed attempts. The account has been locked and the Administrator will see it on the dashboard.';
+            } else {
+                db()->prepare('UPDATE users SET failed_attempts = ? WHERE user_id = ?')->execute([$n, (int)$u['user_id']]);
+                audit('failed login', null, (int)$u['user_id']);
+                $error = 'Invalid username/email or password. ' . (MAX_FAILED - $n) . ' attempt(s) left before the account is locked.';
+            }
+        }
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login | <?= h(APP_NAME) ?></title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="auth">
+  <section class="auth-brand">
+    <?= logo_html() ?>
+    <div class="uni">UNIVERSITY OF IBADAN</div>
+    <h1>DOCUMENT<br>MANAGEMENT SYSTEM</h1>
+    <div class="motto">&ldquo;Recte Sapere Fons&rdquo;</div>
+    <p>A secure, central system for storing, classifying, searching and tracking legal documents for the Faculty of Law.</p>
+    <ul>
+      <li>Role-based access for administrators, secretaries, lawyers and clients</li>
+      <li>Version control and a full audit trail of every action</li>
+      <li>Case files, hearing diary and automatic reminders</li>
+    </ul>
+  </section>
+  <section class="auth-form">
+    <div class="login-box">
+      <h2>Welcome back</h2>
+      <p class="sub">Sign in to continue to your dashboard</p>
+<?php if (isset($_GET['timeout'])): ?><div class="alert alert-info">Your session expired after a period of inactivity. Please log in again.</div><?php endif; ?>
+<?php if (isset($_GET['blocked'])): ?><div class="alert alert-error">Your account is no longer active. Contact the Administrator.</div><?php endif; ?>
+<?php if (isset($_GET['out'])): ?><div class="alert alert-success">You have been logged out.</div><?php endif; ?>
+<?php if ($error): ?><div class="alert alert-error"><?= h($error) ?></div><?php endif; ?>
+      <form method="post" autocomplete="off">
+        <?= csrf_field() ?>
+        <label for="login">Email / Username</label>
+        <input type="text" id="login" name="login" value="<?= h($_POST['login'] ?? '') ?>" required autofocus>
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required>
+        <button type="submit">LOGIN</button>
+      </form>
+      <div class="login-foot">Faculty of Law, University of Ibadan</div>
+    </div>
+  </section>
+</div>
+</body>
+</html>
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+if (current_user()) {
+    audit('logout');
+    end_session();
+}
+redirect('login.php?out=1');
+
+# Document Management System for a Law Firm
+Case study: Faculty of Law, University of Ibadan (CSC 467, Group 35)
+PHP 8 + MySQL web application that implements the design in Chapter Three and the modules described in Chapter Four.
+
+## 1. Set it up on your PC (about 10 minutes)
+
+1. Install **XAMPP** (https://www.apachefriends.org). Choose the version with PHP 8.x.
+2. Open the **XAMPP Control Panel** and click **Start** next to **Apache** and **MySQL**. Both should turn green.
+3. Copy this whole folder (rename it `dms`) into `C:\xampp\htdocs\` so you have `C:\xampp\htdocs\dms\login.php`.
+4. In your browser open **http://localhost/dms/install.php** and click **Install now**.
+   This creates the database `dms_law`, the 10 tables, and sample (fictional) data.
+5. Note the usernames and passwords shown on the page, then click **Go to the login page**.
+6. After installing, **delete `install.php`** from the folder.
+
+Uploaded documents are saved in `C:\xampp\dms_storage` (outside `htdocs`), so a browser can never request a stored file directly. Files are only served by `download.php` after a permission check.
+
+### If something goes wrong
+| Problem | Fix |
+|---|---|
+| "Cannot connect to MySQL" | Start MySQL in the XAMPP Control Panel. If port 3306 is busy, stop other MySQL services or change the port. |
+| Blank page or "Call to undefined function" | Use a PHP 8 version of XAMPP. In `C:\xampp\php\php.ini` make sure `extension=pdo_mysql` and `extension=mbstring` are not commented out (no `;` in front), then restart Apache. |
+| Upload fails for big files | In `php.ini` raise `upload_max_filesize` and `post_max_size` (XAMPP's default is 40M), then restart Apache. |
+| "document storage folder could not be created" | Create the folder `C:\xampp\dms_storage` yourself, or make the project folder writable (the system then uses `dms\storage`). |
+| Want a fresh start | In phpMyAdmin (http://localhost/phpmyadmin) drop the database `dms_law`, delete `C:\xampp\dms_storage`, then open `install.php` again (restore it from your original copy if you deleted it). |
+
+## 2. Demo accounts (created by the installer)
+| Role | Username | Password |
+|---|---|---|
+| Administrator | admin | Admin@123 |
+| Legal Secretary | secretary | Secretary@123 |
+| Lawyer | lawyer1 | Lawyer@123 |
+| Lawyer | lawyer2 | Lawyer@123 |
+| Client | client1 | Client@123 |
+| Client | client2 | Client@123 |
+
+All people, cases and documents are fictional.
+
+## 3. Screenshots for Chapter Four
+Press **Win + Shift + S** to capture. Replace the "illustrative interface" figures with these real pages.
+
+| Chapter 4 figure | Log in as | Page to capture |
+|---|---|---|
+| Figure 4.1 Login | (logged out) | http://localhost/dms/login.php |
+| Figure 4.2 Dashboard | admin, then lawyer1 | Dashboard |
+| Figure 4.3 Document upload | secretary | Upload Document (fill the form before capturing) |
+| Figure 4.4 Document listing | lawyer1 | Documents |
+| Figure 4.5 Search | lawyer1 | Search, type `tenancy`, click SEARCH |
+| Database | (phpMyAdmin) | http://localhost/phpmyadmin, database `dms_law`, tables list and the `users` table |
+
+## 4. Test cases T01 - T10 (Chapter Four, Table 4.2): how to reproduce each one
+| ID | Steps | What to capture |
+|---|---|---|
+| T01 Valid login | Log in as `lawyer1` / `Lawyer@123` | The dashboard |
+| T02 Invalid login | Log in as `lawyer1` with a wrong password | The "Invalid username/email or password" message |
+| T03 Document upload | As `secretary`, Upload Document: choose case FOL/004/26, title "Lease Addendum", type Contract / Agreement, choose any PDF | The success message and the document page |
+| T04 Document listing | As `lawyer1`, open Documents | The list including "Lease Addendum" if the case is yours |
+| T05 Document search | Search for `Tenancy` | The matching result |
+| T06 Document download | On a document page click Download | The browser download bar / the downloaded file |
+| T07 Role restriction | Log in as `secretary` and open http://localhost/dms/users.php | The "Access denied" page |
+| T08 Activity logging | Log in as `admin`, open Activity Log | The log showing login, upload and download entries |
+| T09 Logout | Click Logout | The login page with "You have been logged out" |
+| T10 Invalid upload | On Upload Document choose a `.exe` or `.txt` file | The "File type not allowed" message |
+
+Extra tests that match Chapter Three (good for the discussion section):
+- **Account lockout:** enter a wrong password 5 times for `lawyer2`. The account locks; log in as `admin` and see the red alert on the dashboard and the Users page (set it back to Active).
+- **Version control:** as `lawyer1` open "Case Brief" (two versions) or upload a file with the same title in the same case and see Version 2 in the version history.
+- **Access control:** `lawyer1` cannot open the Restricted "Witness Statement" (case FOL/002/26, assigned to `lawyer2`); `client1` sees only the documents shared with him.
+- **Hearing reminders:** the dashboard of the secretary and lawyers lists hearings due within 7 days.
+- **Backup:** as `admin`, Backup page, download the database backup.
+
+## 5. What is where
+- `login.php`, `logout.php`, `dashboard.php` - authentication and dashboards for each role
+- `users.php`, `audit.php`, `reports.php`, `backup.php` - Administrator (and reports for Lawyers)
+- `clients.php`, `cases.php`, `case_view.php` - clients and case files
+- `upload.php`, `documents.php`, `document.php`, `download.php`, `search.php` - documents, versions, search
+- `hearings.php` - hearing diary and reminders
+- `database/schema.sql` - the 10 tables (Chapter Three, Tables 3.8 - 3.17)
+- `includes/` - shared code (database, access rules, audit trail, layout)
+
+## 6. Security measures built in
+Passwords stored with PHP `password_hash` (bcrypt); prepared statements (SQL injection); output escaping (XSS); CSRF token on every form; role-based access control checked on every page and file download; account lock after 5 failed logins; session expiry after 30 minutes; uploaded files renamed, stored outside the web root, SHA-256 hash recorded and re-checked on download; every important action written to the audit trail.
+
+## 7. University of Ibadan logo
+Save the official logo image in the `assets` folder with the name **`ui-logo.png`** (a PNG with a transparent or white background works best; `.jpg`, `.svg` and `.webp` also work). Refresh the page: the logo appears on the login page and in the sidebar of every page. Until the file is added, a gold "UI" badge is shown.
+
+## 8. Publish the project on GitHub (for the submission link)
+1. Create a free account at https://github.com, click **New repository**, name it (for example `law-firm-dms`), choose **Public** (or Private and add your lecturer), and click **Create repository**.
+2. On the new repository page click **uploading an existing file**, drag in the contents of the `dms` folder, and click **Commit changes**.
+   (Do not upload the `dms_storage` folder; it holds uploaded files and is not part of the code.)
+3. Copy the repository address from the browser. That link is the "Software Implementation GitHub link" deliverable.
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_role(['Administrator', 'Lawyer']);
+$pdo = db();
+$isAdmin = $u['role_name'] === 'Administrator';
+
+// Lawyers see figures only for their own cases; the Administrator sees system-wide totals
+$scope = $isAdmin ? '1=1' : 'c.case_id IN (SELECT case_id FROM case_assignments WHERE user_id = ?)';
+$sp = $isAdmin ? [] : [(int)$u['user_id']];
+
+$st = $pdo->prepare("SELECT c.status, COUNT(*) n FROM cases c WHERE $scope GROUP BY c.status");
+$st->execute($sp);
+$byStatus = $st->fetchAll();
+
+$st = $pdo->prepare("SELECT cat.category_name, COUNT(dd.document_id) n FROM categories cat
+                     LEFT JOIN (SELECT d.document_id, d.category_id FROM documents d JOIN cases c ON c.case_id = d.case_id WHERE $scope) dd
+                            ON dd.category_id = cat.category_id
+                     GROUP BY cat.category_id, cat.category_name ORDER BY n DESC, cat.category_name");
+$st->execute($sp);
+$byCat = $st->fetchAll();
+
+$st = $pdo->prepare("SELECT us.full_name, COUNT(*) n FROM document_versions v
+                     JOIN users us ON us.user_id = v.uploaded_by
+                     JOIN documents d ON d.document_id = v.document_id JOIN cases c ON c.case_id = d.case_id
+                     WHERE v.uploaded_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) AND $scope
+                     GROUP BY us.user_id, us.full_name ORDER BY n DESC");
+$st->execute($sp);
+$byUser = $st->fetchAll();
+
+$st = $pdo->prepare("SELECT h.hearing_date, h.venue, h.purpose, c.case_number, c.title FROM hearings h JOIN cases c ON c.case_id = h.case_id
+                     WHERE h.hearing_date >= NOW() AND h.hearing_date <= DATE_ADD(NOW(), INTERVAL 30 DAY) AND $scope ORDER BY h.hearing_date");
+$st->execute($sp);
+$hear = $st->fetchAll();
+
+$activity = [];
+if ($isAdmin) {
+    $activity = $pdo->query('SELECT action, COUNT(*) n FROM audit_logs WHERE logged_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) GROUP BY action ORDER BY n DESC LIMIT 15')->fetchAll();
+}
+
+page_header('Reports', 'reports.php');
+?>
+    <p class="no-print"><button type="button" onclick="window.print()">Print report</button></p>
+    <p class="muted">Generated on <?= h(date('d M Y, H:i')) ?> <?= $isAdmin ? '(system-wide)' : '(your cases only)' ?></p>
+    <div class="row">
+      <div class="card"><h2>Cases by status</h2><table><tr><th>Status</th><th>Cases</th></tr>
+<?php foreach ($byStatus as $r): ?><tr><td><?= h($r['status']) ?></td><td><?= (int)$r['n'] ?></td></tr><?php endforeach; if (!$byStatus): ?><tr><td colspan="2" class="muted">No data.</td></tr><?php endif; ?></table></div>
+      <div class="card"><h2>Documents by type</h2><table><tr><th>Type</th><th>Documents</th></tr>
+<?php foreach ($byCat as $r): ?><tr><td><?= h($r['category_name']) ?></td><td><?= (int)$r['n'] ?></td></tr><?php endforeach; ?></table></div>
+      <div class="card"><h2>Uploads in the last 30 days</h2><table><tr><th>User</th><th>Files uploaded</th></tr>
+<?php foreach ($byUser as $r): ?><tr><td><?= h($r['full_name']) ?></td><td><?= (int)$r['n'] ?></td></tr><?php endforeach; if (!$byUser): ?><tr><td colspan="2" class="muted">No uploads.</td></tr><?php endif; ?></table></div>
+    </div>
+    <div class="card"><h2>Hearings in the next 30 days</h2>
+      <div class="table-wrap"><table><tr><th>Date and time</th><th>Case</th><th>Venue</th><th>Purpose</th></tr>
+<?php foreach ($hear as $r): ?><tr><td><?= h(fmt_dt($r['hearing_date'])) ?></td><td><?= h($r['case_number']) ?> - <?= h($r['title']) ?></td><td><?= h($r['venue'] ?? '-') ?></td><td><?= h($r['purpose'] ?? '-') ?></td></tr><?php endforeach; if (!$hear): ?><tr><td colspan="4" class="muted">No hearings in the next 30 days.</td></tr><?php endif; ?></table></div>
+    </div>
+<?php if ($isAdmin): ?>
+    <div class="card"><h2>System activity in the last 30 days</h2><table><tr><th>Activity</th><th>Count</th></tr>
+<?php foreach ($activity as $r): ?><tr><td><?= h($r['action']) ?></td><td><?= (int)$r['n'] ?></td></tr><?php endforeach; if (!$activity): ?><tr><td colspan="2" class="muted">No activity.</td></tr><?php endif; ?></table></div>
+<?php endif;
+page_footer();
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_role(['Legal Secretary', 'Lawyer']);
+$pdo = db();
+$q = trim($_GET['q'] ?? '');
+$cat = (int)($_GET['category_id'] ?? 0);
+$from = $_GET['from'] ?? '';
+$to = $_GET['to'] ?? '';
+$searched = isset($_GET['q']) || isset($_GET['category_id']) || isset($_GET['from']) || isset($_GET['to']);
+$results = [];
+
+if ($searched) {
+    [$vis, $vp] = doc_visibility($u);
+    $where = $vis;
+    $params = $vp;
+    if ($q !== '') {
+        $like = '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $q) . '%';
+        $where .= ' AND (d.title LIKE ? OR d.description LIKE ? OR c.case_number LIKE ? OR c.title LIKE ? OR cat.category_name LIKE ?)';
+        array_push($params, $like, $like, $like, $like, $like);
+    }
+    if ($cat > 0) { $where .= ' AND d.category_id = ?'; $params[] = $cat; }
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) { $where .= ' AND DATE(d.upload_date) >= ?'; $params[] = $from; }
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) { $where .= ' AND DATE(d.upload_date) <= ?'; $params[] = $to; }
+    $st = $pdo->prepare("SELECT d.document_id, d.title, d.confidentiality_level, d.current_version, d.upload_date, c.case_number, cat.category_name,
+                                (SELECT v.version_id FROM document_versions v WHERE v.document_id = d.document_id AND v.version_no = d.current_version) AS latest_version_id
+                         FROM documents d JOIN cases c ON c.case_id = d.case_id JOIN categories cat ON cat.category_id = d.category_id
+                         WHERE $where ORDER BY d.upload_date DESC LIMIT 200");
+    $st->execute($params);
+    $results = $st->fetchAll();
+    audit('search: ' . ($q !== '' ? $q : '(filters only)'));
+}
+$cats = $pdo->query('SELECT category_id, category_name FROM categories ORDER BY category_name')->fetchAll();
+
+page_header('Search Documents', 'search.php');
+?>
+    <div class="card">
+      <form method="get">
+        <div class="row">
+          <div><label>Search keyword</label><input type="text" name="q" value="<?= h($q) ?>" placeholder="title, case number, keyword..."></div>
+          <div><label>Filter by type</label><select name="category_id"><option value="0">All Types</option>
+<?php foreach ($cats as $c): ?><option value="<?= (int)$c['category_id'] ?>" <?= $cat === (int)$c['category_id'] ? 'selected' : '' ?>><?= h($c['category_name']) ?></option><?php endforeach; ?></select></div>
+          <div><label>Uploaded from</label><input type="date" name="from" value="<?= h($from) ?>"></div>
+          <div><label>Uploaded to</label><input type="date" name="to" value="<?= h($to) ?>"></div>
+        </div>
+        <p><button type="submit">SEARCH</button> <a class="btn secondary" href="search.php">Clear</a></p>
+      </form>
+    </div>
+<?php if ($searched): ?>
+    <div class="card">
+      <h2>Results (<?= count($results) ?>)</h2>
+<?php if (!$results): ?>
+      <p class="muted">No record found. Try a different keyword or remove some filters.</p>
+<?php else: ?>
+      <div class="table-wrap"><table>
+        <tr><th>Document Title</th><th>Type</th><th>Case No.</th><th>Confidentiality</th><th>Version</th><th>Uploaded</th><th>Action</th></tr>
+<?php foreach ($results as $d): ?>
+        <tr><td><?= h($d['title']) ?></td><td><?= h($d['category_name']) ?></td><td><?= h($d['case_number']) ?></td><td><?= badge($d['confidentiality_level']) ?></td>
+            <td>v<?= (int)$d['current_version'] ?></td><td><?= h(fmt_dt($d['upload_date'])) ?></td>
+            <td class="actions"><a href="document.php?id=<?= (int)$d['document_id'] ?>">View</a> | <a href="download.php?v=<?= (int)$d['latest_version_id'] ?>">Download</a></td></tr>
+<?php endforeach; ?>
+      </table></div>
+<?php endif; ?>
+    </div>
+<?php endif;
+page_footer();
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_role(['Legal Secretary', 'Lawyer']);
+$pdo = db();
+$cases = accessible_cases($u);
+$cats = $pdo->query('SELECT category_id, category_name FROM categories ORDER BY category_name')->fetchAll();
+
+// "Upload new version" mode: upload.php?doc=ID pre-fills the case and title
+$prefill = ['case_id' => (int)($_GET['case'] ?? 0), 'title' => '', 'category_id' => 0, 'locked' => false];
+if (isset($_GET['doc'])) {
+    $d = get_document((int)$_GET['doc']);
+    if ($d && can_access_document($u, $d)) {
+        $prefill = ['case_id' => (int)$d['case_id'], 'title' => $d['title'], 'category_id' => (int)$d['category_id'], 'locked' => true];
+    }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $title = trim($_POST['title'] ?? '');
+    $cat_id = (int)($_POST['category_id'] ?? 0);
+    $conf = $_POST['confidentiality_level'] ?? 'Normal';
+    $visible = isset($_POST['client_visible']) ? 1 : 0;
+    $desc = trim($_POST['description'] ?? '');
+    $errors = [];
+
+    if (!can_access_case($u, $case_id)) $errors[] = 'Choose a case you are allowed to upload to.';
+    if ($title === '' || mb_strlen($title) > 200) $errors[] = 'Enter the document title (up to 200 characters).';
+    $chk = $pdo->prepare('SELECT 1 FROM categories WHERE category_id = ?');
+    $chk->execute([$cat_id]);
+    if (!$chk->fetchColumn()) $errors[] = 'Choose the document type.';
+    if (!in_array($conf, ['Normal', 'Confidential', 'Restricted'], true)) $conf = 'Normal';
+    if (mb_strlen($desc) > 2000) $errors[] = 'Keywords/description is too long.';
+
+    $f = $_FILES['file'] ?? null;
+    $ext = '';
+    if (!$f || $f['error'] === UPLOAD_ERR_NO_FILE) {
+        $errors[] = 'Choose a file to upload.';
+    } elseif ($f['error'] === UPLOAD_ERR_INI_SIZE || $f['error'] === UPLOAD_ERR_FORM_SIZE) {
+        $errors[] = 'The file is larger than the size allowed by the server (check upload_max_filesize in php.ini).';
+    } elseif ($f['error'] !== UPLOAD_ERR_OK) {
+        $errors[] = 'The file could not be uploaded (error code ' . (int)$f['error'] . ').';
+    } else {
+        $ext = strtolower(pathinfo($f['name'], PATHINFO_EXTENSION));
+        if (!in_array($ext, ALLOWED_EXT, true)) $errors[] = 'File type not allowed. Allowed: ' . implode(', ', ALLOWED_EXT) . '.';
+        if ($f['size'] <= 0) $errors[] = 'The file is empty.';
+        if ($f['size'] > MAX_FILE_SIZE) $errors[] = 'The file is larger than 25 MB.';
+    }
+
+    // does a document with this title already exist in the case? then this upload is a new version
+    $existing = null;
+    if (!$errors) {
+        $st = $pdo->prepare('SELECT document_id FROM documents WHERE case_id = ? AND LOWER(title) = LOWER(?) LIMIT 1');
+        $st->execute([$case_id, $title]);
+        $eid = $st->fetchColumn();
+        if ($eid) {
+            $existing = get_document((int)$eid);
+            if (!$existing || !can_access_document($u, $existing)) {
+                $errors[] = 'A document with this title already exists in the case and you do not have permission to add a version to it.';
+            }
+        }
+    }
+
+    if (!$errors) {
+        $hash = hash_file('sha256', $f['tmp_name']);
+        $stored = bin2hex(random_bytes(16)) . '.' . $ext;
+        $dest = storage_dir() . DIRECTORY_SEPARATOR . $stored;
+        if (!move_uploaded_file($f['tmp_name'], $dest)) {
+            $errors[] = 'The file could not be saved to the document store.';
+        } else {
+            try {
+                $pdo->beginTransaction();
+                if ($existing) {
+                    $doc_id = (int)$existing['document_id'];
+                    $vno = (int)$existing['current_version'] + 1;
+                    $pdo->prepare('UPDATE documents SET current_version = ? WHERE document_id = ?')->execute([$vno, $doc_id]);
+                } else {
+                    $pdo->prepare('INSERT INTO documents (case_id, category_id, title, description, confidentiality_level, client_visible, current_version, upload_date)
+                                   VALUES (?, ?, ?, ?, ?, ?, 1, NOW())')
+                        ->execute([$case_id, $cat_id, $title, $desc !== '' ? $desc : null, $conf, $visible]);
+                    $doc_id = (int)$pdo->lastInsertId();
+                    $vno = 1;
+                }
+                $orig = mb_substr(basename((string)$f['name']), 0, 255);
+                $pdo->prepare('INSERT INTO document_versions (document_id, uploaded_by, version_no, file_name, file_path, file_size, file_hash, uploaded_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, NOW())')
+                    ->execute([$doc_id, (int)$u['user_id'], $vno, $orig, $stored, (int)$f['size'], $hash]);
+                $pdo->commit();
+                audit(($existing ? 'new version uploaded (v' . $vno . ')' : 'document uploaded'), $doc_id);
+                flash('success', $existing ? 'Version ' . $vno . ' of "' . $title . '" was saved.' : 'Document "' . $title . '" was uploaded (version 1).');
+                redirect('document.php?id=' . $doc_id);
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                @unlink($dest);
+                $errors[] = 'The document could not be saved. Please try again.';
+            }
+        }
+    }
+    foreach ($errors as $e) flash('error', $e);
+    $prefill = ['case_id' => $case_id, 'title' => $title, 'category_id' => $cat_id, 'locked' => false];
+}
+
+page_header(isset($_GET['doc']) ? 'Upload New Version' : 'Upload Document', 'upload.php');
+?>
+    <div class="card">
+<?php if (!$cases): ?>
+      <p class="muted">You are not assigned to any case yet. A lawyer must be assigned to a case before documents can be uploaded to it.</p>
+<?php else: ?>
+      <form method="post" enctype="multipart/form-data"><?= csrf_field() ?>
+        <div class="row">
+          <div><label>Case No.</label>
+            <select name="case_id" required <?= $prefill['locked'] ? 'style="pointer-events:none;background:#f3f4f6"' : '' ?>>
+              <option value="">- choose case -</option>
+<?php foreach ($cases as $c): ?><option value="<?= (int)$c['case_id'] ?>" <?= (int)$c['case_id'] === (int)$prefill['case_id'] ? 'selected' : '' ?>><?= h($c['case_number'] . ' - ' . $c['title']) ?></option><?php endforeach; ?>
+            </select></div>
+          <div><label>Document Title</label><input type="text" name="title" value="<?= h($prefill['title']) ?>" maxlength="200" required <?= $prefill['locked'] ? 'readonly' : '' ?>>
+            <div class="hint">Using the same title in the same case saves the file as a new version.</div></div>
+          <div><label>Document Type</label><select name="category_id" required><option value="">- choose type -</option>
+<?php foreach ($cats as $c): ?><option value="<?= (int)$c['category_id'] ?>" <?= (int)$c['category_id'] === (int)$prefill['category_id'] ? 'selected' : '' ?>><?= h($c['category_name']) ?></option><?php endforeach; ?></select></div>
+          <div><label>Confidentiality level</label><select name="confidentiality_level"><option>Normal</option><option>Confidential</option><option>Restricted</option></select>
+            <div class="hint">Restricted documents are visible only to the assigned lawyers.</div></div>
+        </div>
+        <label>Keywords / description</label><textarea name="description" maxlength="2000" placeholder="e.g. tenancy, lease, Ibadan"></textarea>
+        <label><input type="checkbox" name="client_visible" value="1"> Share this document with the client in the client portal</label>
+        <label>Select File</label>
+        <input type="file" name="file" id="upload-file" required>
+        <div class="hint">Allowed: PDF, DOCX, XLSX, JPG, PNG. Maximum 25 MB.</div>
+        <div id="file-msg" style="color:#b91c1c;font-weight:700"></div>
+        <p><button type="submit">UPLOAD</button></p>
+      </form>
+<?php endif; ?>
+    </div>
+<?php
+page_footer();
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_role(['Administrator']);
+$pdo = db();
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $action = $_POST['action'] ?? '';
+
+    if ($action === 'create') {
+        $name = trim($_POST['full_name'] ?? '');
+        $email = trim($_POST['email'] ?? '');
+        $username = trim($_POST['username'] ?? '');
+        $pass = (string)($_POST['password'] ?? '');
+        $role_id = (int)($_POST['role_id'] ?? 0);
+        $client_id = (int)($_POST['client_id'] ?? 0);
+        $rs = $pdo->prepare('SELECT role_name FROM roles WHERE role_id = ?');
+        $rs->execute([$role_id]);
+        $role_name = $rs->fetchColumn();
+        $err = '';
+        if ($name === '' || mb_strlen($name) > 100) $err = 'Enter the full name (up to 100 characters).';
+        elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) $err = 'Enter a valid email address.';
+        elseif (!preg_match('/^[A-Za-z0-9_.-]{3,50}$/', $username)) $err = 'Username must be 3-50 characters: letters, numbers, dot, dash or underscore.';
+        elseif (strlen($pass) < 8) $err = 'Password must be at least 8 characters.';
+        elseif (!$role_name) $err = 'Choose a role.';
+        elseif ($role_name === 'Client' && $client_id <= 0) $err = 'A user with the Client role must be linked to a client record.';
+        if ($err) {
+            flash('error', $err);
+        } else {
+            try {
+                $st = $pdo->prepare('INSERT INTO users (role_id, client_id, full_name, email, username, password_hash) VALUES (?, ?, ?, ?, ?, ?)');
+                $st->execute([$role_id, $role_name === 'Client' ? $client_id : null, $name, $email, $username, password_hash($pass, PASSWORD_DEFAULT)]);
+                audit('user created: ' . $username);
+                flash('success', 'User "' . $username . '" was created.');
+            } catch (PDOException $e) {
+                flash('error', 'That username or email is already in use.');
+            }
+        }
+    } elseif ($action === 'status') {
+        $uid = (int)($_POST['user_id'] ?? 0);
+        $status = $_POST['status'] ?? '';
+        if (!in_array($status, ['Active', 'Locked', 'Disabled'], true)) {
+            flash('error', 'Invalid status.');
+        } elseif ($uid === (int)$u['user_id']) {
+            flash('error', 'You cannot change the status of your own account.');
+        } else {
+            $st = $pdo->prepare('UPDATE users SET status = ?, failed_attempts = IF(? = ?, 0, failed_attempts) WHERE user_id = ?');
+            $st->execute([$status, $status, 'Active', $uid]);
+            audit('user status changed to ' . $status . ' (user id ' . $uid . ')');
+            flash('success', 'User status updated to ' . $status . '.');
+        }
+    } elseif ($action === 'resetpw') {
+        $uid = (int)($_POST['user_id'] ?? 0);
+        $pass = (string)($_POST['new_password'] ?? '');
+        if (strlen($pass) < 8) {
+            flash('error', 'The new password must be at least 8 characters.');
+        } else {
+            $st = $pdo->prepare('UPDATE users SET password_hash = ?, failed_attempts = 0 WHERE user_id = ?');
+            $st->execute([password_hash($pass, PASSWORD_DEFAULT), $uid]);
+            audit('password reset (user id ' . $uid . ')');
+            flash('success', 'Password reset.');
+        }
+    }
+    redirect('users.php');
+}
+
+$roles = $pdo->query('SELECT role_id, role_name FROM roles ORDER BY role_id')->fetchAll();
+$clients = $pdo->query('SELECT client_id, full_name FROM clients ORDER BY full_name')->fetchAll();
+$users = $pdo->query('SELECT u.*, r.role_name, c.full_name AS client_name FROM users u JOIN roles r ON r.role_id = u.role_id
+                      LEFT JOIN clients c ON c.client_id = u.client_id ORDER BY u.user_id')->fetchAll();
+
+page_header('Users and Roles', 'users.php');
+?>
+    <div class="card">
+      <h2>Registered users</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Name</th><th>Username</th><th>Email</th><th>Role</th><th>Status</th><th>Last login</th><th>Manage</th></tr>
+<?php foreach ($users as $r): ?>
+        <tr>
+          <td><?= h($r['full_name']) ?><?= $r['client_name'] ? '<div class="muted">Client: ' . h($r['client_name']) . '</div>' : '' ?></td>
+          <td><?= h($r['username']) ?></td><td><?= h($r['email']) ?></td><td><?= h($r['role_name']) ?></td>
+          <td><?= badge($r['status']) ?></td><td><?= h(fmt_dt($r['last_login'])) ?></td>
+          <td>
+<?php if ((int)$r['user_id'] !== (int)$u['user_id']): ?>
+            <form method="post" class="inline-form"><?= csrf_field() ?>
+              <input type="hidden" name="action" value="status"><input type="hidden" name="user_id" value="<?= (int)$r['user_id'] ?>">
+              <select name="status">
+<?php foreach (['Active', 'Locked', 'Disabled'] as $s): ?><option <?= $r['status'] === $s ? 'selected' : '' ?>><?= $s ?></option><?php endforeach; ?>
+              </select><button class="small" type="submit">Set</button>
+            </form>
+<?php endif; ?>
+            <form method="post" class="inline-form" style="margin-top:6px"><?= csrf_field() ?>
+              <input type="hidden" name="action" value="resetpw"><input type="hidden" name="user_id" value="<?= (int)$r['user_id'] ?>">
+              <input type="password" name="new_password" placeholder="New password" minlength="8" required>
+              <button class="small secondary" type="submit">Reset password</button>
+            </form>
+          </td>
+        </tr>
+<?php endforeach; ?>
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>Create a new user</h2>
+      <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="create">
+        <div class="row">
+          <div><label>Full name</label><input type="text" name="full_name" required maxlength="100"></div>
+          <div><label>Email</label><input type="email" name="email" required maxlength="100"></div>
+          <div><label>Username</label><input type="text" name="username" required maxlength="50"></div>
+          <div><label>Password (min. 8 characters)</label><input type="password" name="password" required minlength="8"></div>
+          <div><label>Role</label>
+            <select name="role_id" id="role-select" required>
+              <option value="">- choose -</option>
+<?php foreach ($roles as $ro): ?><option value="<?= (int)$ro['role_id'] ?>"><?= h($ro['role_name']) ?></option><?php endforeach; ?>
+            </select></div>
+          <div id="client-box" style="display:none"><label>Linked client record</label>
+            <select name="client_id"><option value="">- choose client -</option>
+<?php foreach ($clients as $cl): ?><option value="<?= (int)$cl['client_id'] ?>"><?= h($cl['full_name']) ?></option><?php endforeach; ?>
+            </select><div class="hint">The Legal Secretary registers clients first.</div></div>
+        </div>
+        <p><button type="submit">Create user</button></p>
+      </form>
+    </div>
+<?php
+page_footer();
+
+# uploaded documents and local files
+/storage/
+dms_storage/
+*.log
+.DS_Store
+Thumbs.db
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_role(['Administrator']);
+$pdo = db();
+$uid = (int)($_GET['user_id'] ?? 0);
+$act = trim($_GET['action'] ?? '');
+$from = $_GET['from'] ?? '';
+$to = $_GET['to'] ?? '';
+
+$where = '1=1';
+$p = [];
+if ($uid > 0) { $where .= ' AND a.user_id = ?'; $p[] = $uid; }
+if ($act !== '') { $where .= ' AND a.action LIKE ?'; $p[] = '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $act) . '%'; }
+if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) { $where .= ' AND DATE(a.logged_at) >= ?'; $p[] = $from; }
+if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) { $where .= ' AND DATE(a.logged_at) <= ?'; $p[] = $to; }
+
+$st = $pdo->prepare("SELECT a.*, us.username, d.title AS doc_title FROM audit_logs a
+                     LEFT JOIN users us ON us.user_id = a.user_id LEFT JOIN documents d ON d.document_id = a.document_id
+                     WHERE $where ORDER BY a.log_id DESC LIMIT 300");
+$st->execute($p);
+$rows = $st->fetchAll();
+$users = $pdo->query('SELECT user_id, username FROM users ORDER BY username')->fetchAll();
+
+page_header('Activity Log', 'audit.php');
+?>
+    <div class="card no-print">
+      <form method="get">
+        <div class="row">
+          <div><label>User</label><select name="user_id"><option value="0">All users</option>
+<?php foreach ($users as $x): ?><option value="<?= (int)$x['user_id'] ?>" <?= $uid === (int)$x['user_id'] ? 'selected' : '' ?>><?= h($x['username']) ?></option><?php endforeach; ?></select></div>
+          <div><label>Activity contains</label><input type="text" name="action" value="<?= h($act) ?>" placeholder="e.g. login, upload, download"></div>
+          <div><label>From</label><input type="date" name="from" value="<?= h($from) ?>"></div>
+          <div><label>To</label><input type="date" name="to" value="<?= h($to) ?>"></div>
+        </div>
+        <p><button type="submit">Filter</button> <a class="btn secondary" href="audit.php">Clear</a></p>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Activity records (latest 300 shown, newest first)</h2>
+      <div class="table-wrap"><table>
+        <tr><th>#</th><th>Date and time</th><th>Username</th><th>Activity</th><th>Document</th><th>IP address</th></tr>
+<?php foreach ($rows as $r): ?>
+        <tr><td><?= (int)$r['log_id'] ?></td><td><?= h(fmt_dt($r['logged_at'])) ?></td><td><?= h($r['username'] ?? '-') ?></td><td><?= h($r['action']) ?></td>
+            <td><?= h($r['doc_title'] ?? '-') ?></td><td><?= h($r['ip_address'] ?? '-') ?></td></tr>
+<?php endforeach; if (!$rows): ?><tr><td colspan="6" class="muted">No records match the filter.</td></tr><?php endif; ?>
+      </table></div>
+    </div>
+<?php
+page_footer();
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_role(['Administrator']);
+$pdo = db();
+const SEP = "\n-- ---- STATEMENT ----\n";
+
+function make_dump(PDO $pdo): string
+{
+    $out = '-- DMS backup generated ' . date('Y-m-d H:i:s') . SEP . 'SET FOREIGN_KEY_CHECKS=0' . SEP;
+    $tables = $pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
+    foreach ($tables as $t) {
+        $out .= 'DROP TABLE IF EXISTS `' . $t . '`' . SEP;
+        $row = $pdo->query('SHOW CREATE TABLE `' . $t . '`')->fetch(PDO::FETCH_NUM);
+        $out .= $row[1] . SEP;
+        $rows = $pdo->query('SELECT * FROM `' . $t . '`');
+        while ($r = $rows->fetch(PDO::FETCH_NUM)) {
+            $vals = array_map(function ($v) use ($pdo) { return $v === null ? 'NULL' : $pdo->quote((string)$v); }, $r);
+            $out .= 'INSERT INTO `' . $t . '` VALUES (' . implode(',', $vals) . ')' . SEP;
+        }
+    }
+    return $out . 'SET FOREIGN_KEY_CHECKS=1' . SEP;
+}
+
+if (isset($_GET['download'])) {
+    $what = $_GET['download'];
+    if ($what === 'db') {
+        audit('database backup downloaded');
+        $sql = make_dump($pdo);
+        header('Content-Type: application/sql');
+        header('Content-Disposition: attachment; filename="dms_backup_' . date('Ymd_His') . '.sql"');
+        header('Content-Length: ' . strlen($sql));
+        echo $sql;
+        exit;
+    }
+    if ($what === 'files') {
+        if (!class_exists('ZipArchive')) {
+            flash('error', 'The PHP zip extension is not enabled, so a zip of the documents cannot be created.');
+            redirect('backup.php');
+        }
+        $tmp = tempnam(sys_get_temp_dir(), 'dms');
+        $zip = new ZipArchive();
+        if ($zip->open($tmp, ZipArchive::OVERWRITE) !== true) { flash('error', 'Could not create the zip file.'); redirect('backup.php'); }
+        $dir = storage_dir();
+        foreach (scandir($dir) as $f) {
+            if ($f !== '.' && $f !== '..' && $f !== '.htaccess' && is_file($dir . DIRECTORY_SEPARATOR . $f)) $zip->addFile($dir . DIRECTORY_SEPARATOR . $f, $f);
+        }
+        $zip->close();
+        audit('document store backup downloaded');
+        header('Content-Type: application/zip');
+        header('Content-Disposition: attachment; filename="dms_documents_' . date('Ymd_His') . '.zip"');
+        header('Content-Length: ' . filesize($tmp));
+        readfile($tmp);
+        @unlink($tmp);
+        exit;
+    }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $f = $_FILES['backup'] ?? null;
+    if (trim($_POST['confirm'] ?? '') !== 'RESTORE') {
+        flash('error', 'Type RESTORE in capital letters to confirm.');
+    } elseif (!$f || $f['error'] !== UPLOAD_ERR_OK) {
+        flash('error', 'Choose the .sql backup file to restore.');
+    } else {
+        $sql = (string)file_get_contents($f['tmp_name']);
+        if (strpos(substr($sql, 0, 60), '-- DMS backup generated') !== 0) {
+            flash('error', 'This is not a backup file created by this system.');
+        } else {
+            try {
+                foreach (explode(SEP, $sql) as $stmt) {
+                    $stmt = trim($stmt);
+                    if ($stmt === '' || strpos($stmt, '--') === 0) continue;
+                    $pdo->exec($stmt);
+                }
+                audit('database restored from backup');
+                flash('success', 'The database was restored from the backup file.');
+            } catch (Throwable $e) {
+                flash('error', 'Restore failed: ' . $e->getMessage());
+            }
+        }
+    }
+    redirect('backup.php');
+}
+
+page_header('Backup and Recovery', 'backup.php');
+?>
+    <div class="card">
+      <h2>Back up</h2>
+      <p>Download a copy of the database (all tables and records) and of the stored document files. Keep both copies in a safe place, for example an external drive or cloud storage.</p>
+      <p><a class="btn" href="backup.php?download=db">Download database backup (.sql)</a>
+         <a class="btn secondary" href="backup.php?download=files">Download documents (.zip)</a></p>
+    </div>
+    <div class="card">
+      <h2>Restore</h2>
+      <div class="alert alert-error">Restoring replaces ALL current records with the contents of the backup file. This cannot be undone.</div>
+      <form method="post" enctype="multipart/form-data" data-confirm="Restore the database from this file? All current records will be replaced."><?= csrf_field() ?>
+        <label>Backup file (.sql created by this page)</label><input type="file" name="backup" accept=".sql" required>
+        <label>Type RESTORE to confirm</label><input type="text" name="confirm" autocomplete="off" required>
+        <p><button class="danger" type="submit">Restore database</button></p>
+      </form>
+    </div>
+<?php
+page_footer();
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_role(['Legal Secretary', 'Lawyer']);
+$pdo = db();
+$case_id = (int)($_GET['id'] ?? $_POST['case_id'] ?? 0);
+
+$st = $pdo->prepare('SELECT c.*, cl.full_name AS client_name, cl.phone, cl.email FROM cases c JOIN clients cl ON cl.client_id = c.client_id WHERE c.case_id = ?');
+$st->execute([$case_id]);
+$case = $st->fetch();
+if (!$case) { flash('error', 'Case not found.'); redirect('cases.php'); }
+if (!can_access_case($u, $case_id)) {
+    audit('access denied: case ' . $case['case_number']);
+    deny('You are not assigned to this case.');
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $action = $_POST['action'] ?? '';
+    if ($action === 'status') {
+        $status = $_POST['status'] ?? '';
+        if (in_array($status, ['Open', 'Pending', 'Closed'], true)) {
+            $pdo->prepare('UPDATE cases SET status = ?, date_closed = ? WHERE case_id = ?')
+                ->execute([$status, $status === 'Closed' ? date('Y-m-d') : null, $case_id]);
+            audit('case status changed: ' . $case['case_number'] . ' -> ' . $status);
+            flash('success', 'Case status updated to ' . $status . '.');
+        }
+    } elseif ($action === 'assign' && $u['role_name'] === 'Lawyer') {
+        $lawyer_id = (int)($_POST['lawyer_id'] ?? 0);
+        $arole = trim($_POST['assigned_role'] ?? '') ?: 'Assisting Counsel';
+        $chk = $pdo->prepare("SELECT 1 FROM users u JOIN roles r ON r.role_id = u.role_id WHERE u.user_id = ? AND r.role_name = 'Lawyer' AND u.status = 'Active'");
+        $chk->execute([$lawyer_id]);
+        if ($chk->fetchColumn()) {
+            $pdo->prepare('INSERT IGNORE INTO case_assignments (case_id, user_id, assigned_role, date_assigned) VALUES (?, ?, ?, CURDATE())')
+                ->execute([$case_id, $lawyer_id, mb_substr($arole, 0, 30)]);
+            audit('case assigned to lawyer: ' . $case['case_number']);
+            flash('success', 'Lawyer assigned to the case.');
+        } else {
+            flash('error', 'Choose an active lawyer.');
+        }
+    }
+    redirect('case_view.php?id=' . $case_id);
+}
+
+[$vis, $vp] = doc_visibility($u);
+$st = $pdo->prepare("SELECT d.document_id, d.title, d.confidentiality_level, d.current_version, d.upload_date, cat.category_name
+                     FROM documents d JOIN cases c ON c.case_id = d.case_id JOIN categories cat ON cat.category_id = d.category_id
+                     WHERE d.case_id = ? AND $vis ORDER BY d.upload_date DESC");
+$st->execute(array_merge([$case_id], $vp));
+$docs = $st->fetchAll();
+
+$st = $pdo->prepare('SELECT * FROM hearings WHERE case_id = ? ORDER BY hearing_date');
+$st->execute([$case_id]);
+$hearings = $st->fetchAll();
+
+$st = $pdo->prepare('SELECT a.*, us.full_name FROM case_assignments a JOIN users us ON us.user_id = a.user_id WHERE a.case_id = ? ORDER BY a.assignment_id');
+$st->execute([$case_id]);
+$team = $st->fetchAll();
+
+$lawyers = $pdo->query("SELECT u.user_id, u.full_name FROM users u JOIN roles r ON r.role_id = u.role_id WHERE r.role_name = 'Lawyer' AND u.status = 'Active' ORDER BY u.full_name")->fetchAll();
+
+page_header('Case ' . $case['case_number'], 'cases.php');
+?>
+    <div class="card">
+      <h2><?= h($case['title']) ?> <?= badge($case['status']) ?></h2>
+      <div class="row">
+        <div><div class="muted">Client</div><?= h($case['client_name']) ?><div class="muted"><?= h($case['phone']) ?></div></div>
+        <div><div class="muted">Case type</div><?= h($case['case_type']) ?></div>
+        <div><div class="muted">Court</div><?= h($case['court'] ?? '-') ?></div>
+        <div><div class="muted">Opened / Closed</div><?= h(fmt_d($case['date_opened'])) ?> / <?= h(fmt_d($case['date_closed'])) ?></div>
+      </div>
+      <form method="post" class="inline-form" style="margin-top:12px"><?= csrf_field() ?><input type="hidden" name="action" value="status"><input type="hidden" name="case_id" value="<?= $case_id ?>">
+        <b>Change status:</b>
+        <select name="status"><?php foreach (['Open', 'Pending', 'Closed'] as $s): ?><option <?= $case['status'] === $s ? 'selected' : '' ?>><?= $s ?></option><?php endforeach; ?></select>
+        <button class="small" type="submit">Update</button>
+      </form>
+      <p style="margin-top:12px"><a class="btn small" href="upload.php?case=<?= $case_id ?>">Upload document to this case</a>
+         <a class="btn small secondary" href="hearings.php?case=<?= $case_id ?>">Schedule hearing</a></p>
+    </div>
+
+    <div class="card">
+      <h2>Documents</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Title</th><th>Type</th><th>Confidentiality</th><th>Version</th><th>Uploaded</th><th>Action</th></tr>
+<?php foreach ($docs as $d): ?>
+        <tr><td><?= h($d['title']) ?></td><td><?= h($d['category_name']) ?></td><td><?= badge($d['confidentiality_level']) ?></td><td>v<?= (int)$d['current_version'] ?></td>
+            <td><?= h(fmt_dt($d['upload_date'])) ?></td><td class="actions"><a href="document.php?id=<?= (int)$d['document_id'] ?>">View</a></td></tr>
+<?php endforeach; if (!$docs): ?><tr><td colspan="6" class="muted">No documents you are allowed to see in this case.</td></tr><?php endif; ?>
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>Hearings</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Date and time</th><th>Venue</th><th>Purpose</th><th>Reminder</th></tr>
+<?php foreach ($hearings as $hr): ?>
+        <tr><td><?= h(fmt_dt($hr['hearing_date'])) ?></td><td><?= h($hr['venue'] ?? '-') ?></td><td><?= h($hr['purpose'] ?? '-') ?></td><td><?= $hr['reminder_sent'] ? 'Sent' : 'Pending' ?></td></tr>
+<?php endforeach; if (!$hearings): ?><tr><td colspan="4" class="muted">No hearings scheduled.</td></tr><?php endif; ?>
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>Lawyers assigned</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Name</th><th>Role on case</th><th>Date assigned</th></tr>
+<?php foreach ($team as $t): ?>
+        <tr><td><?= h($t['full_name']) ?></td><td><?= h($t['assigned_role']) ?></td><td><?= h(fmt_d($t['date_assigned'])) ?></td></tr>
+<?php endforeach; if (!$team): ?><tr><td colspan="3" class="muted">No lawyer assigned yet.</td></tr><?php endif; ?>
+      </table></div>
+<?php if ($u['role_name'] === 'Lawyer'): ?>
+      <form method="post" class="inline-form" style="margin-top:12px"><?= csrf_field() ?><input type="hidden" name="action" value="assign"><input type="hidden" name="case_id" value="<?= $case_id ?>">
+        <b>Assign case to lawyer:</b>
+        <select name="lawyer_id" required><option value="">- choose lawyer -</option>
+<?php foreach ($lawyers as $l): ?><option value="<?= (int)$l['user_id'] ?>"><?= h($l['full_name']) ?></option><?php endforeach; ?></select>
+        <input type="text" name="assigned_role" placeholder="Role (e.g. Assisting Counsel)" maxlength="30">
+        <button class="small" type="submit">Assign</button>
+      </form>
+<?php endif; ?>
+    </div>
+<?php
+page_footer();
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_role(['Legal Secretary', 'Lawyer']);
+$pdo = db();
+$isLawyer = $u['role_name'] === 'Lawyer';
+$types = ['Civil', 'Criminal', 'Commercial', 'Land and Property', 'Family and Probate', 'Constitutional', 'Administrative', 'Other'];
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $action = $_POST['action'] ?? '';
+
+    if ($action === 'create') {
+        $client_id = (int)($_POST['client_id'] ?? 0);
+        $number = trim($_POST['case_number'] ?? '');
+        $title = trim($_POST['title'] ?? '');
+        $type = $_POST['case_type'] ?? '';
+        $court = trim($_POST['court'] ?? '');
+        $status = $_POST['status'] ?? 'Open';
+        $opened = $_POST['date_opened'] ?? '';
+        $err = '';
+        $chk = $pdo->prepare('SELECT 1 FROM clients WHERE client_id = ?');
+        $chk->execute([$client_id]);
+        if (!$chk->fetchColumn()) $err = 'Choose a registered client.';
+        elseif ($number === '' || mb_strlen($number) > 30) $err = 'Enter a case number (up to 30 characters).';
+        elseif ($title === '' || mb_strlen($title) > 200) $err = 'Enter the case title (up to 200 characters).';
+        elseif (!in_array($type, $types, true)) $err = 'Choose the case type.';
+        elseif (!in_array($status, ['Open', 'Pending', 'Closed'], true)) $err = 'Choose a valid status.';
+        elseif (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $opened)) $err = 'Enter the date the case was opened.';
+        if ($err) {
+            flash('error', $err);
+        } else {
+            try {
+                $pdo->beginTransaction();
+                $st = $pdo->prepare('INSERT INTO cases (client_id, case_number, title, case_type, court, status, date_opened, date_closed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+                $st->execute([$client_id, $number, $title, $type, $court !== '' ? $court : null, $status, $opened, $status === 'Closed' ? date('Y-m-d') : null]);
+                $case_id = (int)$pdo->lastInsertId();
+                if ($isLawyer) {
+                    $pdo->prepare('INSERT INTO case_assignments (case_id, user_id, assigned_role, date_assigned) VALUES (?, ?, ?, CURDATE())')
+                        ->execute([$case_id, (int)$u['user_id'], 'Lead Counsel']);
+                }
+                $pdo->commit();
+                audit('case created: ' . $number);
+                flash('success', 'Case file ' . $number . ' was created.');
+            } catch (PDOException $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                flash('error', 'That case number already exists.');
+            }
+        }
+    } elseif ($action === 'assign_me' && $isLawyer) {
+        $case_id = (int)($_POST['case_id'] ?? 0);
+        $chk = $pdo->prepare('SELECT case_number FROM cases WHERE case_id = ?');
+        $chk->execute([$case_id]);
+        $num = $chk->fetchColumn();
+        if ($num) {
+            $pdo->prepare('INSERT IGNORE INTO case_assignments (case_id, user_id, assigned_role, date_assigned) VALUES (?, ?, ?, CURDATE())')
+                ->execute([$case_id, (int)$u['user_id'], 'Lead Counsel']);
+            audit('case assigned to lawyer: ' . $num);
+            flash('success', 'You have been assigned to case ' . $num . '.');
+        }
+    }
+    redirect('cases.php');
+}
+
+$filter = $_GET['status'] ?? '';
+$where = '1=1';
+$params = [];
+if ($isLawyer) {
+    $where = 'c.case_id IN (SELECT case_id FROM case_assignments WHERE user_id = ?)';
+    $params[] = (int)$u['user_id'];
+}
+if (in_array($filter, ['Open', 'Pending', 'Closed'], true)) {
+    $where .= ' AND c.status = ?';
+    $params[] = $filter;
+}
+$st = $pdo->prepare("SELECT c.*, cl.full_name AS client_name,
+                            (SELECT COUNT(*) FROM documents d WHERE d.case_id = c.case_id) AS doc_count,
+                            (SELECT GROUP_CONCAT(us.full_name SEPARATOR ', ') FROM case_assignments a JOIN users us ON us.user_id = a.user_id WHERE a.case_id = c.case_id) AS lawyers
+                     FROM cases c JOIN clients cl ON cl.client_id = c.client_id WHERE $where ORDER BY c.date_opened DESC, c.case_id DESC");
+$st->execute($params);
+$cases = $st->fetchAll();
+
+$unassigned = [];
+if ($isLawyer) {
+    $unassigned = $pdo->query('SELECT c.case_id, c.case_number, c.title, cl.full_name AS client_name FROM cases c
+                               JOIN clients cl ON cl.client_id = c.client_id
+                               WHERE NOT EXISTS (SELECT 1 FROM case_assignments a WHERE a.case_id = c.case_id) AND c.status <> \'Closed\'')->fetchAll();
+}
+$clients = $pdo->query('SELECT client_id, full_name FROM clients ORDER BY full_name')->fetchAll();
+
+page_header('Cases', 'cases.php');
+?>
+    <div class="card">
+      <h2><?= $isLawyer ? 'My cases' : 'All case files' ?></h2>
+      <form method="get" class="inline-form no-print" style="margin-bottom:10px">
+        <select name="status"><option value="">All statuses</option>
+<?php foreach (['Open', 'Pending', 'Closed'] as $s): ?><option <?= $filter === $s ? 'selected' : '' ?>><?= $s ?></option><?php endforeach; ?>
+        </select><button class="small" type="submit">Filter</button>
+      </form>
+      <div class="table-wrap"><table>
+        <tr><th>Case No.</th><th>Title</th><th>Client</th><th>Type</th><th>Status</th><th>Lawyer(s)</th><th>Docs</th><th>Action</th></tr>
+<?php foreach ($cases as $c): ?>
+        <tr><td><?= h($c['case_number']) ?></td><td><?= h($c['title']) ?></td><td><?= h($c['client_name']) ?></td><td><?= h($c['case_type']) ?></td>
+            <td><?= badge($c['status']) ?></td><td><?= h($c['lawyers'] ?? 'Not assigned') ?></td><td><?= (int)$c['doc_count'] ?></td>
+            <td class="actions"><a href="case_view.php?id=<?= (int)$c['case_id'] ?>">Open</a></td></tr>
+<?php endforeach; if (!$cases): ?><tr><td colspan="8" class="muted">No cases found.</td></tr><?php endif; ?>
+      </table></div>
+    </div>
+
+<?php if ($isLawyer && $unassigned): ?>
+    <div class="card">
+      <h2>Cases waiting for a lawyer</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Case No.</th><th>Title</th><th>Client</th><th>Action</th></tr>
+<?php foreach ($unassigned as $c): ?>
+        <tr><td><?= h($c['case_number']) ?></td><td><?= h($c['title']) ?></td><td><?= h($c['client_name']) ?></td>
+            <td><form method="post" class="inline"><?= csrf_field() ?><input type="hidden" name="action" value="assign_me"><input type="hidden" name="case_id" value="<?= (int)$c['case_id'] ?>">
+                <button class="small" type="submit">Assign to me</button></form></td></tr>
+<?php endforeach; ?>
+      </table></div>
+    </div>
+<?php endif; ?>
+
+    <div class="card">
+      <h2>Create a case file</h2>
+<?php if (!$clients): ?>
+      <p class="muted">No clients are registered yet. The Legal Secretary must register the client first.</p>
+<?php else: ?>
+      <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="create">
+        <div class="row">
+          <div><label>Client</label><select name="client_id" required><option value="">- choose client -</option>
+<?php foreach ($clients as $cl): ?><option value="<?= (int)$cl['client_id'] ?>"><?= h($cl['full_name']) ?></option><?php endforeach; ?></select></div>
+          <div><label>Case number</label><input type="text" name="case_number" placeholder="e.g. FOL/006/26" required maxlength="30"></div>
+          <div><label>Case title</label><input type="text" name="title" required maxlength="200"></div>
+          <div><label>Case type</label><select name="case_type" required>
+<?php foreach ($types as $t): ?><option><?= h($t) ?></option><?php endforeach; ?></select></div>
+          <div><label>Court (optional)</label><input type="text" name="court" maxlength="100"></div>
+          <div><label>Status</label><select name="status"><option>Open</option><option>Pending</option><option>Closed</option></select></div>
+          <div><label>Date opened</label><input type="date" name="date_opened" value="<?= date('Y-m-d') ?>" required></div>
+        </div>
+        <?php if ($isLawyer): ?><div class="hint">You will be assigned to this case automatically.</div><?php else: ?><div class="hint">A lawyer assigns the case to himself or herself from the Cases page.</div><?php endif; ?>
+        <p><button type="submit">Create case file</button></p>
+      </form>
+<?php endif; ?>
+    </div>
+<?php
+page_footer();
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_role(['Legal Secretary']);
+$pdo = db();
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $name = trim($_POST['full_name'] ?? '');
+    $type = $_POST['client_type'] ?? '';
+    $phone = trim($_POST['phone'] ?? '');
+    $email = trim($_POST['email'] ?? '');
+    $address = trim($_POST['address'] ?? '');
+    $err = '';
+    if ($name === '' || mb_strlen($name) > 150) $err = 'Enter the client name (up to 150 characters).';
+    elseif (!in_array($type, ['Individual', 'Organisation'], true)) $err = 'Choose the client type.';
+    elseif ($phone === '' || !preg_match('/^[0-9+\s()-]{6,20}$/', $phone)) $err = 'Enter a valid phone number.';
+    elseif ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) $err = 'Enter a valid email address or leave it empty.';
+    if ($err) {
+        flash('error', $err);
+    } else {
+        $st = $pdo->prepare('INSERT INTO clients (full_name, client_type, phone, email, address) VALUES (?, ?, ?, ?, ?)');
+        $st->execute([$name, $type, $phone, $email !== '' ? $email : null, $address !== '' ? $address : null]);
+        audit('client registered: ' . $name);
+        flash('success', 'Client "' . $name . '" was registered.');
+    }
+    redirect('clients.php');
+}
+
+$clients = $pdo->query('SELECT c.*, (SELECT COUNT(*) FROM cases x WHERE x.client_id = c.client_id) AS case_count
+                        FROM clients c ORDER BY c.full_name')->fetchAll();
+page_header('Clients', 'clients.php');
+?>
+    <div class="card">
+      <h2>Register a client</h2>
+      <form method="post"><?= csrf_field() ?>
+        <div class="row">
+          <div><label>Full name / organisation</label><input type="text" name="full_name" required maxlength="150"></div>
+          <div><label>Client type</label><select name="client_type" required><option>Individual</option><option>Organisation</option></select></div>
+          <div><label>Phone</label><input type="text" name="phone" required maxlength="20"></div>
+          <div><label>Email (optional)</label><input type="email" name="email" maxlength="100"></div>
+          <div><label>Address (optional)</label><input type="text" name="address" maxlength="255"></div>
+        </div>
+        <p><button type="submit">Register client</button></p>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Registered clients</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Name</th><th>Type</th><th>Phone</th><th>Email</th><th>Address</th><th>Cases</th></tr>
+<?php foreach ($clients as $c): ?>
+        <tr><td><?= h($c['full_name']) ?></td><td><?= h($c['client_type']) ?></td><td><?= h($c['phone']) ?></td>
+            <td><?= h($c['email'] ?? '-') ?></td><td><?= h($c['address'] ?? '-') ?></td><td><?= (int)$c['case_count'] ?></td></tr>
+<?php endforeach; if (!$clients): ?><tr><td colspan="6" class="muted">No clients registered yet.</td></tr><?php endif; ?>
+      </table></div>
+    </div>
+<?php
+page_footer();
+
+<?php
+// ---------------------------------------------------------------
+//  Document Management System - configuration
+//  Default values work with a fresh XAMPP installation.
+// ---------------------------------------------------------------
+define('DB_HOST', 'localhost');
+define('DB_NAME', 'dms_law');
+define('DB_USER', 'root');
+define('DB_PASS', '');            // XAMPP's MySQL root user has an empty password by default
+
+define('APP_NAME', 'Document Management System');
+define('MAX_FILE_SIZE', 25 * 1024 * 1024);          // 25 MB per file
+define('ALLOWED_EXT', ['pdf', 'docx', 'xlsx', 'jpg', 'png']);
+define('SESSION_TIMEOUT', 1800);                    // 30 minutes of inactivity
+define('MAX_FAILED', 5);                            // failed logins before an account is locked
+
+// Uploaded documents are kept in a folder OUTSIDE the project (and outside htdocs on XAMPP),
+// so a browser can never request a stored file directly. Files are only served through download.php.
+define('STORAGE_PATH', dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'dms_storage');
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_login();
+$role = $u['role_name'];
+$pdo = db();
+
+/* ================= ADMINISTRATOR ================= */
+if ($role === 'Administrator') {
+    $docs   = (int)$pdo->query('SELECT COUNT(*) FROM documents')->fetchColumn();
+    $users  = (int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
+    $cats   = (int)$pdo->query('SELECT COUNT(*) FROM categories')->fetchColumn();
+    $lockedUsers = $pdo->query("SELECT full_name, username FROM users WHERE status = 'Locked'")->fetchAll();
+    $recent = $pdo->query('SELECT a.*, us.username, d.title AS doc_title FROM audit_logs a
+                           LEFT JOIN users us ON us.user_id = a.user_id
+                           LEFT JOIN documents d ON d.document_id = a.document_id
+                           ORDER BY a.log_id DESC LIMIT 10')->fetchAll();
+    page_header('Dashboard', 'dashboard.php');
+    hero_banner('ADMINISTRATOR', 'Welcome, ' . $u['full_name'], 'Manage user accounts and roles, review the activity log, and keep the system backed up.');
+    ?>
+    <div class="stats">
+      <div class="stat">Documents<b><?= $docs ?></b></div>
+      <div class="stat">Users<b><?= $users ?></b></div>
+      <div class="stat">Categories<b><?= $cats ?></b></div>
+      <div class="stat <?= count($lockedUsers) ? 'warn' : '' ?>">Locked accounts<b><?= count($lockedUsers) ?></b></div>
+    </div>
+<?php if ($lockedUsers): ?>
+    <div class="alert alert-error"><b>Attention:</b> these accounts were locked after repeated failed logins:
+      <?= h(implode(', ', array_map(function ($x) { return $x['full_name'] . ' (' . $x['username'] . ')'; }, $lockedUsers))) ?>.
+      <a href="users.php">Open user management</a> to unlock them.</div>
+<?php endif; ?>
+    <div class="card">
+      <h2>Recent activity</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Date and time</th><th>User</th><th>Activity</th><th>Document</th><th>IP address</th></tr>
+<?php foreach ($recent as $r): ?>
+        <tr><td><?= h(fmt_dt($r['logged_at'])) ?></td><td><?= h($r['username'] ?? '-') ?></td><td><?= h($r['action']) ?></td>
+            <td><?= h($r['doc_title'] ?? '-') ?></td><td><?= h($r['ip_address']) ?></td></tr>
+<?php endforeach; if (!$recent): ?><tr><td colspan="5" class="muted">No activity recorded yet.</td></tr><?php endif; ?>
+      </table></div>
+      <p><a href="audit.php">View the full activity log</a></p>
+    </div>
+<?php
+    page_footer();
+    exit;
+}
+
+/* ================= CLIENT PORTAL ================= */
+if ($role === 'Client') {
+    $cid = (int)($u['client_id'] ?? 0);
+    $st = $pdo->prepare('SELECT * FROM cases WHERE client_id = ? ORDER BY date_opened DESC');
+    $st->execute([$cid]);
+    $cases = $st->fetchAll();
+    [$vis, $vp] = doc_visibility($u);
+    $st = $pdo->prepare("SELECT d.document_id, d.title, d.current_version, d.upload_date, c.case_number, cat.category_name
+                         FROM documents d JOIN cases c ON c.case_id = d.case_id JOIN categories cat ON cat.category_id = d.category_id
+                         WHERE $vis ORDER BY d.upload_date DESC");
+    $st->execute($vp);
+    $shared = $st->fetchAll();
+    page_header('My Cases', 'dashboard.php');
+    hero_banner('CLIENT PORTAL', 'Welcome, ' . $u['full_name'], 'Follow the status of your cases and download the documents your lawyer has shared with you.');
+    ?>
+    <div class="card">
+      <h2>Status of my cases</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Case No.</th><th>Title</th><th>Type</th><th>Court</th><th>Opened</th><th>Status</th></tr>
+<?php foreach ($cases as $c): ?>
+        <tr><td><?= h($c['case_number']) ?></td><td><?= h($c['title']) ?></td><td><?= h($c['case_type']) ?></td><td><?= h($c['court'] ?? '-') ?></td>
+            <td><?= h(fmt_d($c['date_opened'])) ?></td><td><?= badge($c['status']) ?></td></tr>
+<?php endforeach; if (!$cases): ?><tr><td colspan="6" class="muted">No cases are linked to your account.</td></tr><?php endif; ?>
+      </table></div>
+    </div>
+    <div class="card">
+      <h2>Documents shared with me</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Title</th><th>Type</th><th>Case No.</th><th>Version</th><th>Date</th><th>Action</th></tr>
+<?php foreach ($shared as $d): ?>
+        <tr><td><?= h($d['title']) ?></td><td><?= h($d['category_name']) ?></td><td><?= h($d['case_number']) ?></td><td>v<?= (int)$d['current_version'] ?></td>
+            <td><?= h(fmt_d($d['upload_date'])) ?></td><td class="actions"><a href="document.php?id=<?= (int)$d['document_id'] ?>">View</a></td></tr>
+<?php endforeach; if (!$shared): ?><tr><td colspan="6" class="muted">Your lawyer has not shared any documents yet.</td></tr><?php endif; ?>
+      </table></div>
+    </div>
+<?php
+    page_footer();
+    exit;
+}
+
+/* ================= SECRETARY / LAWYER ================= */
+[$vis, $vp] = doc_visibility($u);
+$st = $pdo->prepare("SELECT COUNT(*) FROM documents d JOIN cases c ON c.case_id = d.case_id WHERE $vis");
+$st->execute($vp);
+$docCount = (int)$st->fetchColumn();
+
+if ($role === 'Lawyer') {
+    $st = $pdo->prepare('SELECT COUNT(*) FROM case_assignments WHERE user_id = ?');
+    $st->execute([(int)$u['user_id']]);
+    $caseCount = (int)$st->fetchColumn();
+} else {
+    $caseCount = (int)$pdo->query('SELECT COUNT(*) FROM cases')->fetchColumn();
+}
+$catCount = (int)$pdo->query('SELECT COUNT(*) FROM categories')->fetchColumn();
+
+$hearings = upcoming_hearings($u, 7);
+if ($hearings) {
+    $ids = implode(',', array_map(function ($h) { return (int)$h['hearing_id']; }, $hearings));
+    $pdo->exec("UPDATE hearings SET reminder_sent = 1 WHERE hearing_id IN ($ids)");
+}
+
+$st = $pdo->prepare("SELECT d.document_id, d.title, d.upload_date, d.current_version, c.case_number, cat.category_name
+                     FROM documents d JOIN cases c ON c.case_id = d.case_id JOIN categories cat ON cat.category_id = d.category_id
+                     WHERE $vis ORDER BY d.upload_date DESC LIMIT 6");
+$st->execute($vp);
+$recentDocs = $st->fetchAll();
+
+page_header('Dashboard', 'dashboard.php');
+hero_banner(strtoupper($role), 'Welcome, ' . $u['full_name'], 'Your cases, documents and hearing reminders in one place. Everything you open or change is recorded in the audit trail.');
+?>
+    <div class="stats">
+      <div class="stat">Documents<b><?= $docCount ?></b></div>
+      <div class="stat">Cases<b><?= $caseCount ?></b></div>
+      <div class="stat">Categories<b><?= $catCount ?></b></div>
+      <div class="stat <?= $hearings ? 'warn' : '' ?>">Hearings in 7 days<b><?= count($hearings) ?></b></div>
+    </div>
+<?php if ($hearings): ?>
+    <div class="alert alert-info"><b>Hearing reminders</b>
+<?php foreach ($hearings as $hr): ?>
+      <div>&bull; <?= h(fmt_dt($hr['hearing_date'])) ?> - <?= h($hr['case_number']) ?> (<?= h($hr['case_title']) ?>)<?= $hr['venue'] ? ' at ' . h($hr['venue']) : '' ?></div>
+<?php endforeach; ?>
+    </div>
+<?php endif; ?>
+    <div class="card">
+      <h2>Recent documents</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Document Title</th><th>Type</th><th>Case No.</th><th>Version</th><th>Uploaded</th><th>Action</th></tr>
+<?php foreach ($recentDocs as $d): ?>
+        <tr><td><?= h($d['title']) ?></td><td><?= h($d['category_name']) ?></td><td><?= h($d['case_number']) ?></td><td>v<?= (int)$d['current_version'] ?></td>
+            <td><?= h(fmt_dt($d['upload_date'])) ?></td><td class="actions"><a href="document.php?id=<?= (int)$d['document_id'] ?>">View</a></td></tr>
+<?php endforeach; if (!$recentDocs): ?><tr><td colspan="6" class="muted">No documents yet.</td></tr><?php endif; ?>
+      </table></div>
+      <p><a class="btn small" href="upload.php">Upload Document</a> <a class="btn small secondary" href="search.php">Search</a></p>
+    </div>
+<?php
+page_footer();
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_login();
+if ($u['role_name'] === 'Administrator') {
+    audit('access denied: document.php');
+    deny('The Administrator manages the system but does not open case documents.');
+}
+$id = (int)($_GET['id'] ?? 0);
+$doc = get_document($id);
+if (!$doc) { flash('error', 'Document not found.'); redirect('dashboard.php'); }
+if (!can_access_document($u, $doc)) {
+    audit('access denied: document', $id);
+    deny('You are not allowed to open this document.');
+}
+audit('document viewed', $id);
+
+$st = db()->prepare('SELECT v.*, us.full_name FROM document_versions v JOIN users us ON us.user_id = v.uploaded_by WHERE v.document_id = ? ORDER BY v.version_no DESC');
+$st->execute([$id]);
+$versions = $st->fetchAll();
+$canWrite = in_array($u['role_name'], ['Legal Secretary', 'Lawyer'], true);
+
+page_header('Document Details', 'documents.php');
+?>
+    <div class="card">
+      <h2><?= h($doc['title']) ?> <?= badge($doc['confidentiality_level']) ?></h2>
+      <div class="row">
+        <div><div class="muted">Case</div><?= h($doc['case_number']) ?> - <?= h($doc['case_title']) ?></div>
+        <div><div class="muted">Document type</div><?= h($doc['category_name']) ?></div>
+        <div><div class="muted">Current version</div>v<?= (int)$doc['current_version'] ?></div>
+        <div><div class="muted">First uploaded</div><?= h(fmt_dt($doc['upload_date'])) ?></div>
+        <div><div class="muted">Shared with client</div><?= $doc['client_visible'] ? 'Yes' : 'No' ?></div>
+      </div>
+<?php if ($doc['description']): ?><p><span class="muted">Keywords / description</span><br><?= nl2br(h($doc['description'])) ?></p><?php endif; ?>
+<?php if ($canWrite): ?><p><a class="btn small" href="upload.php?doc=<?= $id ?>">Upload new version</a></p><?php endif; ?>
+    </div>
+    <div class="card">
+      <h2>Version history</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Version</th><th>File name</th><th>Size</th><th>Uploaded by</th><th>Date</th><th>SHA-256 (first 16)</th><th>Action</th></tr>
+<?php foreach ($versions as $v):
+    $ext = strtolower(pathinfo($v['file_path'], PATHINFO_EXTENSION)); ?>
+        <tr><td>v<?= (int)$v['version_no'] ?><?= (int)$v['version_no'] === (int)$doc['current_version'] ? ' (current)' : '' ?></td>
+            <td><?= h($v['file_name']) ?></td><td><?= h(fmt_size($v['file_size'])) ?></td><td><?= h($v['full_name']) ?></td>
+            <td><?= h(fmt_dt($v['uploaded_at'])) ?></td><td><code><?= h(substr($v['file_hash'], 0, 16)) ?></code></td>
+            <td class="actions">
+<?php if (in_array($ext, ['pdf', 'jpg', 'png'], true)): ?><a href="download.php?v=<?= (int)$v['version_id'] ?>&amp;inline=1" target="_blank">Open</a> | <?php endif; ?>
+              <a href="download.php?v=<?= (int)$v['version_id'] ?>">Download</a></td></tr>
+<?php endforeach; ?>
+      </table></div>
+    </div>
+<?php
+page_footer();
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_role(['Legal Secretary', 'Lawyer']);
+[$vis, $vp] = doc_visibility($u);
+$st = db()->prepare("SELECT d.document_id, d.title, d.confidentiality_level, d.current_version, d.upload_date, c.case_number, cat.category_name,
+                            (SELECT v.version_id FROM document_versions v WHERE v.document_id = d.document_id AND v.version_no = d.current_version) AS latest_version_id
+                     FROM documents d JOIN cases c ON c.case_id = d.case_id JOIN categories cat ON cat.category_id = d.category_id
+                     WHERE $vis ORDER BY d.upload_date DESC LIMIT 500");
+$st->execute($vp);
+$docs = $st->fetchAll();
+page_header('Documents', 'documents.php');
+?>
+    <div class="card">
+      <h2>Stored documents</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Document Title</th><th>Type</th><th>Case No.</th><th>Confidentiality</th><th>Version</th><th>Uploaded</th><th>Action</th></tr>
+<?php foreach ($docs as $d): ?>
+        <tr><td><?= h($d['title']) ?></td><td><?= h($d['category_name']) ?></td><td><?= h($d['case_number']) ?></td>
+            <td><?= badge($d['confidentiality_level']) ?></td><td>v<?= (int)$d['current_version'] ?></td><td><?= h(fmt_dt($d['upload_date'])) ?></td>
+            <td class="actions"><a href="document.php?id=<?= (int)$d['document_id'] ?>">View</a> |
+                <a href="download.php?v=<?= (int)$d['latest_version_id'] ?>">Download</a></td></tr>
+<?php endforeach; if (!$docs): ?><tr><td colspan="7" class="muted">No documents available to you yet.</td></tr><?php endif; ?>
+      </table></div>
+      <p><a class="btn small" href="upload.php">Upload Document</a></p>
+    </div>
+<?php
+page_footer();
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_login();
+$vid = (int)($_GET['v'] ?? 0);
+$inline = isset($_GET['inline']);
+
+$st = db()->prepare('SELECT * FROM document_versions WHERE version_id = ?');
+$st->execute([$vid]);
+$v = $st->fetch();
+$doc = $v ? get_document((int)$v['document_id']) : null;
+if (!$v || !$doc) { http_response_code(404); die('File not found.'); }
+
+if (!can_access_document($u, $doc)) {
+    audit('access denied: download', (int)$doc['document_id']);
+    deny('You are not allowed to download this document.');
+}
+
+$path = storage_dir() . DIRECTORY_SEPARATOR . basename($v['file_path']);
+if (!is_file($path)) {
+    audit('file missing in store', (int)$doc['document_id']);
+    http_response_code(404);
+    die('The stored file is missing. Contact the Administrator.');
+}
+if (!hash_equals(strtolower($v['file_hash']), hash_file('sha256', $path))) {
+    audit('integrity check failed', (int)$doc['document_id']);
+    http_response_code(500);
+    die('Integrity check failed: the stored file no longer matches its recorded SHA-256 hash.');
+}
+
+audit($inline ? 'file opened' : 'download', (int)$doc['document_id']);
+
+$ext = strtolower(pathinfo($v['file_path'], PATHINFO_EXTENSION));
+$types = [
+    'pdf'  => 'application/pdf',
+    'jpg'  => 'image/jpeg',
+    'png'  => 'image/png',
+    'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+];
+$safeName = preg_replace('/[^A-Za-z0-9._ -]/', '_', $v['file_name']);
+header('Content-Type: ' . ($types[$ext] ?? 'application/octet-stream'));
+header('Content-Disposition: ' . (($inline && in_array($ext, ['pdf', 'jpg', 'png'], true)) ? 'inline' : 'attachment') . '; filename="' . $safeName . '"');
+header('Content-Length: ' . filesize($path));
+header('X-Content-Type-Options: nosniff');
+readfile($path);
+exit;
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+$u = require_role(['Legal Secretary', 'Lawyer']);
+$pdo = db();
+$cases = accessible_cases($u);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $when = str_replace('T', ' ', trim($_POST['hearing_date'] ?? ''));
+    $venue = trim($_POST['venue'] ?? '');
+    $purpose = trim($_POST['purpose'] ?? '');
+    $ts = strtotime($when);
+    if (!can_access_case($u, $case_id)) {
+        flash('error', 'Choose a case you are allowed to manage.');
+    } elseif ($ts === false) {
+        flash('error', 'Enter a valid hearing date and time.');
+    } else {
+        $pdo->prepare('INSERT INTO hearings (case_id, hearing_date, venue, purpose) VALUES (?, ?, ?, ?)')
+            ->execute([$case_id, date('Y-m-d H:i:s', $ts), $venue !== '' ? mb_substr($venue, 0, 150) : null, $purpose !== '' ? mb_substr($purpose, 0, 200) : null]);
+        audit('hearing scheduled (case id ' . $case_id . ')');
+        flash('success', 'Hearing scheduled for ' . date('d M Y, H:i', $ts) . '.');
+    }
+    redirect('hearings.php');
+}
+
+$sql = 'SELECT h.*, c.case_number, c.title AS case_title FROM hearings h JOIN cases c ON c.case_id = h.case_id';
+$p = [];
+if ($u['role_name'] === 'Lawyer') {
+    $sql .= ' WHERE h.case_id IN (SELECT case_id FROM case_assignments WHERE user_id = ?)';
+    $p[] = (int)$u['user_id'];
+}
+$sql .= ' ORDER BY h.hearing_date';
+$st = $pdo->prepare($sql);
+$st->execute($p);
+$all = $st->fetchAll();
+$now = time();
+$upcoming = array_filter($all, function ($x) use ($now) { return strtotime($x['hearing_date']) >= $now; });
+$past = array_reverse(array_filter($all, function ($x) use ($now) { return strtotime($x['hearing_date']) < $now; }));
+$preCase = (int)($_GET['case'] ?? 0);
+
+page_header('Hearing Diary', 'hearings.php');
+?>
+    <div class="card">
+      <h2>Schedule a hearing</h2>
+<?php if (!$cases): ?><p class="muted">No cases available. A lawyer must be assigned to a case first.</p>
+<?php else: ?>
+      <form method="post"><?= csrf_field() ?>
+        <div class="row">
+          <div><label>Case</label><select name="case_id" required><option value="">- choose case -</option>
+<?php foreach ($cases as $c): ?><option value="<?= (int)$c['case_id'] ?>" <?= $preCase === (int)$c['case_id'] ? 'selected' : '' ?>><?= h($c['case_number'] . ' - ' . $c['title']) ?></option><?php endforeach; ?></select></div>
+          <div><label>Date and time</label><input type="datetime-local" name="hearing_date" required></div>
+          <div><label>Venue (court / courtroom)</label><input type="text" name="venue" maxlength="150"></div>
+          <div><label>Purpose</label><input type="text" name="purpose" maxlength="200" placeholder="e.g. Hearing of motion"></div>
+        </div>
+        <p><button type="submit">Schedule hearing</button></p>
+      </form>
+<?php endif; ?>
+    </div>
+    <div class="card">
+      <h2>Upcoming hearings</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Date and time</th><th>Case</th><th>Venue</th><th>Purpose</th><th>Reminder</th></tr>
+<?php foreach ($upcoming as $x):
+    $days = (int)ceil((strtotime($x['hearing_date']) - $now) / 86400); ?>
+        <tr><td><?= h(fmt_dt($x['hearing_date'])) ?><div class="muted">in <?= $days ?> day(s)</div></td>
+            <td><?= h($x['case_number']) ?> - <?= h($x['case_title']) ?></td><td><?= h($x['venue'] ?? '-') ?></td><td><?= h($x['purpose'] ?? '-') ?></td>
+            <td><?= $days <= 7 ? '<span class="badge b-pending">Due within 7 days</span>' : '<span class="muted">Not yet due</span>' ?></td></tr>
+<?php endforeach; if (!$upcoming): ?><tr><td colspan="5" class="muted">No upcoming hearings.</td></tr><?php endif; ?>
+      </table></div>
+    </div>
+    <div class="card">
+      <h2>Past hearings</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Date and time</th><th>Case</th><th>Venue</th><th>Purpose</th></tr>
+<?php foreach ($past as $x): ?>
+        <tr><td><?= h(fmt_dt($x['hearing_date'])) ?></td><td><?= h($x['case_number']) ?> - <?= h($x['case_title']) ?></td><td><?= h($x['venue'] ?? '-') ?></td><td><?= h($x['purpose'] ?? '-') ?></td></tr>
+<?php endforeach; if (!$past): ?><tr><td colspan="4" class="muted">None.</td></tr><?php endif; ?>
+      </table></div>
+    </div>
+<?php
+page_footer();
+
+<?php
+require_once __DIR__ . '/includes/bootstrap.php';
+redirect(current_user() ? 'dashboard.php' : 'login.php');
+
+<?php
+/*
+ * One-time installer: creates the database, the 10 tables and sample (fictional) data.
+ * Open http://localhost/dms/install.php once, click "Install now", then DELETE this file.
+ */
+require_once __DIR__ . '/includes/bootstrap.php';
+
+function install_page(string $title, string $body): void
+{
+    echo '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+       . '<title>' . h($title) . '</title><link rel="stylesheet" href="assets/style.css"></head><body style="background:#f3f5f9">'
+       . '<div style="max-width:760px;margin:30px auto;padding:0 14px"><div class="card"><h2>' . h($title) . '</h2>' . $body . '</div></div></body></html>';
+    exit;
+}
+
+$opts = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC];
+
+// 1. Can we reach MySQL at all?
+try {
+    $root = new PDO('mysql:host=' . DB_HOST . ';charset=utf8mb4', DB_USER, DB_PASS, $opts);
+} catch (PDOException $e) {
+    install_page('Cannot connect to MySQL', '<div class="alert alert-error">' . h($e->getMessage()) . '</div>'
+        . '<p>Open the XAMPP Control Panel and click <b>Start</b> next to <b>MySQL</b>. If you changed the MySQL password, update DB_USER and DB_PASS in <code>config.php</code>.</p>');
+}
+
+// 2. Already installed?
+try {
+    $probe = new PDO('mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4', DB_USER, DB_PASS, $opts);
+    if ((int)$probe->query('SELECT COUNT(*) FROM users')->fetchColumn() > 0) {
+        install_page('Already installed', '<p>The database <b>' . h(DB_NAME) . '</b> already contains data.</p>'
+            . '<p><a class="btn" href="login.php">Go to the login page</a></p>'
+            . '<p class="muted">To start again from scratch: open phpMyAdmin, drop the database "' . h(DB_NAME) . '", delete the folder <code>dms_storage</code> next to your htdocs folder, then reload this page.</p>');
+    }
+} catch (PDOException $e) {
+    // database or tables do not exist yet - continue
+}
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    install_page('Install the Document Management System',
+        '<p>This will create the database <b>' . h(DB_NAME) . '</b>, its 10 tables, and sample data (fictional clients, cases, documents and users) so you can test every module and take screenshots.</p>'
+        . '<form method="post">' . csrf_field() . '<button type="submit">Install now</button></form>');
+}
+csrf_check();
+
+try {
+    $root->exec('CREATE DATABASE IF NOT EXISTS `' . DB_NAME . '` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
+    $pdo = new PDO('mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4', DB_USER, DB_PASS, $opts);
+
+    // ---- tables ----
+    $schema = (string)file_get_contents(__DIR__ . '/database/schema.sql');
+    foreach (preg_split('/;\s*\n/', $schema) as $chunk) {
+        $stmt = trim(preg_replace('/^--.*$/m', '', $chunk));
+        if ($stmt !== '') $pdo->exec($stmt);
+    }
+
+    // ---- roles ----
+    $roleId = [];
+    foreach ([
+        'Administrator'   => 'Manages users, roles, the activity log and backups',
+        'Legal Secretary' => 'Registers clients, creates case files and handles documents',
+        'Lawyer'          => 'Handles assigned cases and their documents',
+        'Client'          => 'Views own case status and documents shared by the lawyer',
+    ] as $name => $desc) {
+        $pdo->prepare('INSERT INTO roles (role_name, description) VALUES (?, ?)')->execute([$name, $desc]);
+        $roleId[$name] = (int)$pdo->lastInsertId();
+    }
+
+    // ---- categories ----
+    $catId = [];
+    foreach (['Case File', 'Pleading', 'Affidavit', 'Contract / Agreement', 'Court Order / Judgment', 'Legal Opinion', 'Correspondence', 'Administrative'] as $name) {
+        $pdo->prepare('INSERT INTO categories (category_name) VALUES (?)')->execute([$name]);
+        $catId[$name] = (int)$pdo->lastInsertId();
+    }
+
+    // ---- clients (fictional) ----
+    $clientId = [];
+    foreach ([
+        'balogun' => ['Mr. Tunde Balogun', 'Individual', '08030000001', 'tunde.balogun@example.com', 'Bodija, Ibadan'],
+        'agro'    => ['Oyo Agro Cooperative Ltd', 'Organisation', '08030000002', 'info@oyoagro.example.com', 'Iware, Ibadan'],
+        'okonkwo' => ['Mrs. Ngozi Okonkwo', 'Individual', '08030000003', null, 'Mokola, Ibadan'],
+        'faculty' => ['Faculty of Law, University of Ibadan', 'Organisation', '08030000004', 'law@faculty.example.com', 'University of Ibadan, Ibadan'],
+    ] as $k => $c) {
+        $pdo->prepare('INSERT INTO clients (full_name, client_type, phone, email, address) VALUES (?, ?, ?, ?, ?)')->execute($c);
+        $clientId[$k] = (int)$pdo->lastInsertId();
+    }
+
+    // ---- users (fictional) ----
+    $demo = [
+        ['admin',      'System Administrator',      'admin@faculty.example.com',      'Admin@123',     'Administrator',   null],
+        ['secretary',  'Mrs. Folake Adeyemi',       'folake.adeyemi@faculty.example.com', 'Secretary@123', 'Legal Secretary', null],
+        ['lawyer1',    'Barr. Chukwuemeka Okafor',  'c.okafor@faculty.example.com',   'Lawyer@123',    'Lawyer',          null],
+        ['lawyer2',    'Barr. Amina Bello',         'a.bello@faculty.example.com',    'Lawyer@123',    'Lawyer',          null],
+        ['client1',    'Mr. Tunde Balogun',         'tunde.balogun@example.com',      'Client@123',    'Client',          'balogun'],
+        ['client2',    'Oyo Agro Cooperative (portal)', 'portal@oyoagro.example.com', 'Client@123',    'Client',          'agro'],
+    ];
+    $userId = [];
+    foreach ($demo as $d) {
+        $pdo->prepare('INSERT INTO users (role_id, client_id, full_name, email, username, password_hash) VALUES (?, ?, ?, ?, ?, ?)')
+            ->execute([$roleId[$d[4]], $d[5] ? $clientId[$d[5]] : null, $d[1], $d[2], $d[0], password_hash($d[3], PASSWORD_DEFAULT)]);
+        $userId[$d[0]] = (int)$pdo->lastInsertId();
+    }
+
+    // ---- cases ----
+    $caseId = [];
+    foreach ([
+        'c1' => ['balogun', 'FOL/001/26', 'Balogun v. Adewale Properties Ltd', 'Civil', 'High Court of Oyo State, Ibadan', 'Open', '2026-03-02', null],
+        'c2' => ['agro',    'FOL/002/26', 'Oyo Agro Cooperative - Iware Land Dispute', 'Land and Property', 'High Court of Oyo State, Ibadan', 'Pending', '2026-03-18', null],
+        'c3' => ['balogun', 'FOL/003/26', 'Estate of the late Chief Ogunleye - Probate', 'Family and Probate', 'Probate Registry, Ibadan', 'Open', '2026-04-07', null],
+        'c4' => ['agro',    'FOL/004/26', 'Review of Commercial Tenancy Agreement', 'Commercial', null, 'Open', '2026-05-11', null],
+        'c5' => ['okonkwo', 'FOL/005/25', 'Okonkwo v. State (Appeal)', 'Criminal', 'Court of Appeal, Ibadan Division', 'Closed', '2025-09-15', '2026-02-20'],
+        'c6' => ['faculty', 'FOL/ADM/26', 'Faculty Administration (internal records)', 'Administrative', null, 'Open', '2026-01-05', null],
+    ] as $k => $c) {
+        $pdo->prepare('INSERT INTO cases (client_id, case_number, title, case_type, court, status, date_opened, date_closed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            ->execute([$clientId[$c[0]], $c[1], $c[2], $c[3], $c[4], $c[5], $c[6], $c[7]]);
+        $caseId[$k] = (int)$pdo->lastInsertId();
+    }
+    foreach ([['c1', 'lawyer1', 'Lead Counsel'], ['c1', 'lawyer2', 'Assisting Counsel'], ['c2', 'lawyer2', 'Lead Counsel'],
+              ['c3', 'lawyer1', 'Lead Counsel'], ['c4', 'lawyer1', 'Lead Counsel'], ['c5', 'lawyer2', 'Lead Counsel']] as $a) {
+        $pdo->prepare('INSERT INTO case_assignments (case_id, user_id, assigned_role, date_assigned) VALUES (?, ?, ?, CURDATE())')
+            ->execute([$caseId[$a[0]], $userId[$a[1]], $a[2]]);
+    }
+    // (FOL/ADM/26 is deliberately left unassigned so that "Assign to me" can be demonstrated)
+
+    // ---- documents with real sample files ----
+    $store = storage_dir();
+    $addFile = function (string $sample) use ($store): array {
+        $stored = bin2hex(random_bytes(16)) . '.pdf';
+        $src = __DIR__ . '/database/sample_files/' . $sample;
+        copy($src, $store . DIRECTORY_SEPARATOR . $stored);
+        return [$stored, filesize($src), hash_file('sha256', $src)];
+    };
+    $docs = [
+        // case, category, title, description, confidentiality, client_visible, uploader, [[sample file, original name, days ago], ...]
+        ['c1', 'Case File', 'Case Brief', 'brief, tenancy, possession, arrears', 'Confidential', 1, 'lawyer1', [['case_brief_v1.pdf', 'Case_Brief_v1.pdf', 20], ['case_brief_v2.pdf', 'Case_Brief_v2.pdf', 6]]],
+        ['c1', 'Pleading', 'Statement of Claim', 'originating process, claim for possession', 'Normal', 0, 'secretary', [['statement_of_claim.pdf', 'Statement_of_Claim.pdf', 18]]],
+        ['c1', 'Affidavit', 'Affidavit of Service', 'service, bailiff', 'Normal', 0, 'secretary', [['affidavit_of_service.pdf', 'Affidavit_of_Service.pdf', 12]]],
+        ['c4', 'Legal Opinion', 'Legal Opinion', 'opinion, tenancy, renewal clause', 'Confidential', 1, 'lawyer1', [['legal_opinion.pdf', 'Legal_Opinion.pdf', 9]]],
+        ['c4', 'Contract / Agreement', 'Tenancy Agreement', 'lease, commercial premises', 'Normal', 1, 'secretary', [['tenancy_agreement.pdf', 'Tenancy_Agreement.pdf', 14]]],
+        ['c2', 'Affidavit', 'Witness Statement - Iware Land', 'boundary, community witness', 'Restricted', 0, 'lawyer2', [['witness_statement.pdf', 'Witness_Statement.pdf', 8]]],
+        ['c5', 'Court Order / Judgment', 'Court Order', 'appeal dismissed', 'Normal', 0, 'lawyer2', [['court_order.pdf', 'Court_Order.pdf', 45]]],
+        ['c6', 'Administrative', 'Meeting Minutes', 'faculty meeting, records retention', 'Normal', 0, 'secretary', [['meeting_minutes.pdf', 'Meeting_Minutes.pdf', 30]]],
+    ];
+    foreach ($docs as $d) {
+        $first = date('Y-m-d H:i:s', strtotime('-' . $d[7][0][2] . ' days'));
+        $pdo->prepare('INSERT INTO documents (case_id, category_id, title, description, confidentiality_level, client_visible, current_version, upload_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            ->execute([$caseId[$d[0]], $catId[$d[1]], $d[2], $d[3], $d[4], $d[5], count($d[7]), $first]);
+        $docId = (int)$pdo->lastInsertId();
+        foreach ($d[7] as $i => $v) {
+            [$stored, $size, $hash] = $addFile($v[0]);
+            $pdo->prepare('INSERT INTO document_versions (document_id, uploaded_by, version_no, file_name, file_path, file_size, file_hash, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+                ->execute([$docId, $userId[$d[6]], $i + 1, $v[1], $stored, $size, $hash, date('Y-m-d H:i:s', strtotime('-' . $v[2] . ' days'))]);
+        }
+    }
+
+    // ---- hearings (dates relative to today so reminders show up) ----
+    foreach ([
+        ['c1', '+3 days 10:00',  'High Court 5, Ibadan', 'Hearing of motion for accelerated hearing'],
+        ['c1', '+21 days 09:30', 'High Court 5, Ibadan', 'Mention'],
+        ['c2', '+6 days 11:00',  'High Court 2, Ibadan', 'Visit to locus in quo'],
+        ['c3', '+40 days 10:00', 'Probate Registry',     'Grant of letters of administration'],
+        ['c5', '-50 days 10:00', 'Court of Appeal, Ibadan', 'Judgment'],
+    ] as $hr) {
+        $pdo->prepare('INSERT INTO hearings (case_id, hearing_date, venue, purpose) VALUES (?, ?, ?, ?)')
+            ->execute([$caseId[$hr[0]], date('Y-m-d H:i:s', strtotime($hr[1])), $hr[2], $hr[3]]);
+    }
+
+    audit('system installed with sample data');
+} catch (Throwable $e) {
+    install_page('Installation failed', '<div class="alert alert-error">' . h($e->getMessage()) . '</div>'
+        . '<p>Fix the problem above, then in phpMyAdmin drop the database "' . h(DB_NAME) . '" (if it was created) and reload this page.</p>');
+}
+
+$rows = '';
+foreach ($demo as $d) {
+    $rows .= '<tr><td>' . h($d[4]) . '</td><td><code>' . h($d[0]) . '</code></td><td><code>' . h($d[3]) . '</code></td></tr>';
+}
+install_page('Installation complete',
+    '<div class="alert alert-success">The database, tables and sample data were created.</div>'
+    . '<p>Sign in with one of these accounts (all names and data are fictional):</p>'
+    . '<table><tr><th>Role</th><th>Username</th><th>Password</th></tr>' . $rows . '</table>'
+    . '<p><a class="btn" href="login.php">Go to the login page</a></p>'
+    . '<div class="alert alert-error"><b>Important:</b> delete <code>install.php</code> from the project folder now, and change these passwords (Users page) before real use.</div>');
